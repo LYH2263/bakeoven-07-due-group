@@ -38,6 +38,17 @@ class BatchCreate(BaseModel):
     code: str | None = None
 
 
+class GroupItemIn(BaseModel):
+    product_id: int
+    start_min: int = Field(ge=0, le=24 * 60 - 1)  # 开工分钟：不得更早开工
+    due_min: int = Field(ge=0, le=24 * 60)  # 应出炉分钟
+    code: str | None = None
+
+
+class GroupAssignIn(BaseModel):
+    items: list[GroupItemIn] = Field(min_length=1)
+
+
 class GanttBlock(BaseModel):
     batch_id: int
     code: str

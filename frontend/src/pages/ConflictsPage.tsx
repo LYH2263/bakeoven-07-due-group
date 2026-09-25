@@ -7,6 +7,6 @@ export default function ConflictsPage() {
   return (<>
     <h2>冲突</h2>
     <table className="table"><thead><tr><th>时间</th><th>批次</th><th>炉位</th><th>详情</th></tr></thead>
-    <tbody>{rows.map(c => <tr key={c.id}><td className="mono">{new Date(c.created_at).toLocaleString()}</td><td>{c.batch_code}</td><td>{c.oven_id}</td><td>{c.detail}</td></tr>)}</tbody></table>
+    <tbody>{rows.map(c => <tr key={c.id}><td className="mono">{new Date(c.created_at).toLocaleString()}</td><td>{c.batch_code}</td><td>{c.oven_id === 0 ? "—" : c.oven_id}</td><td>{c.detail}</td></tr>)}</tbody></table>
   </>);
 }

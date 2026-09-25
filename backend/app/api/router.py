@@ -9,13 +9,16 @@ from app.schemas.schemas import (
     BatchOut,
     ConflictOut,
     GanttBlock,
+    GroupAssignIn,
     OvenOut,
     ProductOut,
     WindowOut,
 )
 from app.services.oven_engine import (
+    DueItem,
     Occupancy,
     RecipeDurations,
+    assign_group,
     build_occupancies,
     find_conflicts,
     next_free_window,
@@ -109,6 +112,66 @@ def create_batch(body: BatchCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(batch)
     return _batch_out(db, batch)
+
+
+@api_router.post("/batches/assign-group", response_model=list[BatchOut])
+def assign_group_batches(body: GroupAssignIn, db: Session = Depends(get_db)):
+    """按应出炉成组定炉：整组成功才写入批次；任一找不到炉则整组不落库。"""
+    ovens = db.scalars(select(Oven).order_by(Oven.id)).all()
+    if not ovens:
+        raise HTTPException(400, "没有可用炉位")
+    products = {p.id: p for p in db.scalars(select(Product)).all()}
+    taken = set(db.scalars(select(Batch.code)).all())
+    items: list[DueItem] = []
+    for idx, raw in enumerate(body.items):
+        product = products.get(raw.product_id)
+        if not product:
+            raise HTTPException(404, f"产品不存在: {raw.product_id}")
+        base = raw.code or f"BO-{raw.start_min}"
+        code, n = base, 1
+        while code in taken:
+            n += 1
+            code = f"{base}-{n}"
+        taken.add(code)
+        items.append(
+            DueItem(
+                index=idx,
+                code=code,
+                recipe=_recipe(product),
+                release_min=raw.start_min,
+                due_min=raw.due_min,
+            )
+        )
+    placements, failure = assign_group(
+        _all_occupancies(db), [o.id for o in ovens], items
+    )
+    if failure:
+        stuck = failure.item
+        per_oven = "、".join(
+            f"{o.label} 最早 {failure.oven_earliest_end[o.id]}"
+            if failure.oven_earliest_end[o.id] is not None
+            else f"{o.label} 日内无可排"
+            for o in ovens
+        )
+        detail = f"成组定炉失败：卡在 {stuck.code}（应出炉 {stuck.due_min}）；{per_oven}"
+        db.add(ConflictLog(batch_code=stuck.code, oven_id=0, detail=detail))
+        db.commit()
+        raise HTTPException(409, detail)
+    by_index = {raw_idx: raw for raw_idx, raw in enumerate(body.items)}
+    created: list[Batch] = []
+    for pl in placements:
+        batch = Batch(
+            product_id=by_index[pl.item.index].product_id,
+            oven_id=pl.oven_id,
+            code=pl.item.code,
+            start_min=pl.start_min,
+        )
+        db.add(batch)
+        created.append(batch)
+    db.commit()
+    for b in created:
+        db.refresh(b)
+    return [_batch_out(db, b) for b in created]
 
 
 @api_router.get("/gantt", response_model=list[GanttBlock])
