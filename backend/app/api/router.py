@@ -6,19 +6,27 @@ from app.database import get_db
 from app.models.models import Batch, ConflictLog, Oven, Product
 from app.schemas.schemas import (
     BatchCreate,
+    BatchGroupCreate,
+    BatchGroupOut,
     BatchOut,
     ConflictOut,
     GanttBlock,
+    GroupConflictDetail,
+    GroupConflictOven,
+    GroupPlacementOut,
     OvenOut,
     ProductOut,
     WindowOut,
 )
 from app.services.oven_engine import (
+    GroupItem,
+    GroupPlanError,
     Occupancy,
     RecipeDurations,
     build_occupancies,
     find_conflicts,
     next_free_window,
+    plan_group,
 )
 
 api_router = APIRouter()
@@ -26,6 +34,12 @@ api_router = APIRouter()
 
 def _recipe(p: Product) -> RecipeDurations:
     return RecipeDurations(p.ferment_min, p.bake_min)
+
+
+def _hhmm(minute: int | None) -> str:
+    if minute is None:
+        return "当日放不下"
+    return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
 def _all_occupancies(db: Session) -> list[Occupancy]:
@@ -109,6 +123,118 @@ def create_batch(body: BatchCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(batch)
     return _batch_out(db, batch)
+
+
+@api_router.post("/batches/group", response_model=BatchGroupOut, status_code=201)
+def create_batch_group(body: BatchGroupCreate, db: Session = Depends(get_db)):
+    # Resolve every product first; 404 means the request itself is invalid,
+    # not a scheduling failure, so no conflict log is written.
+    products: list[Product] = []
+    for it in body.items:
+        product = db.get(Product, it.product_id)
+        if not product:
+            raise HTTPException(404, f"产品 {it.product_id} 不存在")
+        products.append(product)
+
+    # Fill codes up front so conflict messages and returned rows agree.
+    codes: list[str] = []
+    for idx, it in enumerate(body.items):
+        codes.append(it.code or f"BO-G{idx:02d}")
+    if len(set(codes)) != len(codes):
+        raise HTTPException(400, "组内批次编码重复")
+    taken = set(
+        db.scalars(select(Batch.code).where(Batch.code.in_(codes))).all()
+    )
+    if taken:
+        raise HTTPException(400, f"批次编码已存在：{sorted(taken)}")
+
+    ovens = db.scalars(select(Oven).order_by(Oven.id)).all()
+    oven_labels = {o.id: o.label for o in ovens}
+    items = [
+        GroupItem(
+            submitted_index=idx,
+            code=codes[idx],
+            product_id=product.id,
+            start_min=it.start_min,
+            due_min=it.due_min,
+            recipe=_recipe(product),
+        )
+        for idx, (product, it) in enumerate(zip(products, body.items))
+    ]
+
+    try:
+        placements = plan_group(_all_occupancies(db), [o.id for o in ovens], items)
+    except GroupPlanError as err:
+        stuck = err.item
+        oven_rows = [
+            GroupConflictOven(
+                oven_id=oven_id,
+                oven_label=oven_labels[oven_id],
+                earliest_end_min=end,
+            )
+            for oven_id, end in sorted(err.oven_ends.items())
+        ]
+        ends_text = "；".join(
+            f"{oven_labels[row.oven_id]}最早{_hhmm(row.earliest_end_min)}"
+            f"（{row.earliest_end_min if row.earliest_end_min is not None else '—'} 分）"
+            for row in oven_rows
+        )
+        detail = (
+            f"成组定炉第 {err.order_index + 1} 条 {stuck.code} 无炉可排："
+            f"应出炉 {stuck.due_min} 分（{_hhmm(stuck.due_min)}）前烤不完；{ends_text}。"
+            "整组未写入。"
+        )
+        # oven_id=0 marks a group-level failure that belongs to no single oven.
+        db.add(ConflictLog(batch_code=stuck.code, oven_id=0, detail=detail))
+        db.commit()
+        raise HTTPException(
+            409,
+            detail=GroupConflictDetail(
+                message=detail,
+                order_index=err.order_index,
+                submitted_index=stuck.submitted_index,
+                batch_code=stuck.code,
+                due_min=stuck.due_min,
+                ovens=oven_rows,
+            ).model_dump(),
+        )
+
+    # All items planned: persist the whole group in one commit.
+    created: list[Batch] = []
+    for plc in placements:
+        batch = Batch(
+            product_id=plc.product_id,
+            oven_id=plc.oven_id,
+            code=plc.code,
+            start_min=plc.start_min,
+        )
+        db.add(batch)
+        created.append(batch)
+    db.commit()
+    for batch in created:
+        db.refresh(batch)
+
+    created_by_code = {b.code: b for b in created}
+    out: list[GroupPlacementOut] = []
+    for plc in placements:
+        batch = created_by_code[plc.code]
+        product = db.get(Product, plc.product_id)
+        ferment_end = plc.start_min + (product.ferment_min if product else 0)
+        out.append(
+            GroupPlacementOut(
+                submitted_index=plc.submitted_index,
+                code=plc.code,
+                product_id=plc.product_id,
+                product_name=product.name if product else None,
+                oven_id=plc.oven_id,
+                oven_label=oven_labels[plc.oven_id],
+                start_min=plc.start_min,
+                ferment_end=ferment_end,
+                bake_end=plc.end_min,
+            )
+        )
+    out.sort(key=lambda r: r.submitted_index)
+    return BatchGroupOut(placements=out)
 
 
 @api_router.get("/gantt", response_model=list[GanttBlock])

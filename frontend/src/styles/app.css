@@ -247,6 +247,24 @@ select, input, .gantt-deck button, .toolbar button {
 }
 .mono { font-family: "IBM Plex Mono", monospace; }
 .err { color: #ff9b7a; } .ok { color: #e8c48a; }
+.dim { opacity: .6; font-size: .85rem; }
+.hint { font-size: .85rem; opacity: .75; margin: -.35rem 0 .85rem; max-width: 72ch; }
+h3 { margin: 1.4rem 0 .5rem; font-size: .98rem; color: var(--text); }
+h3:not(:first-of-type) { border-top: 1px solid var(--line); padding-top: 1rem; }
+.group-editor { margin-bottom: .65rem; max-width: 880px; }
+.group-editor select, .group-editor input { padding: .35rem .5rem; }
+.toolbar button:disabled { opacity: .55; cursor: default; }
+.group-error { margin: .5rem 0 1rem; }
+.group-error .table { margin-top: .5rem; max-width: 480px; }
+.conflict-chip--group {
+  display: inline-block;
+  background: #3a1810;
+  border: 1px solid #c06040;
+  color: #ffb090;
+  border-radius: 2px;
+  padding: .05rem .4rem;
+  font-size: .78rem;
+}
 
 .gantt { display: flex; flex-direction: column; gap: .65rem; }
 .gantt-row {
